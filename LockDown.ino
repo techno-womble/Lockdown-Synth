@@ -2,14 +2,22 @@
  *  
  * Spring 2020 C19 Lockdown fun
  * John Potter (TechnoWomble)
- * Last mod 7 Apr 2020
+ * Last mod 10 Apr 2020
  * 
  */
 #include <ADC.h>
 #include <MozziGuts.h>
 #include <Oscil.h> 
 
+#include <Audio.h>
+#include <Wire.h>
+#include <SPI.h>
+
+
+// AudioOutputUSB      audioOutput;              try for USB audio later
+
 #include <tables/sin2048_int8.h> 
+#include <tables/triangle2048_int8.h> 
 #include <tables/saw2048_int8.h> 
 #include <tables/square_no_alias_2048_int8.h> 
 
@@ -20,11 +28,24 @@ int currentNote;
 int ampLevel = 0;                         //amplitude 0-255
 int keyDownCount = 0;                     // number of keys currently pressed
 int masterVol = 127;
+int mixerVal = 63;
+int osc1CoarseTune;
+float osc2FineTune = 1.0;
 float pbFactor = 1.0;
+int osc1WavIndex = 0;
+int osc2WavIndex = 0;
+
+int osc1[2];
+int osc2[2];
 
 // continuous controllers
 
-const byte ccVol = 07;
+const byte ccVol = 0x07;
+const byte ccOsc1Wav = 0x41;
+const byte ccOsc2Wav = 0x7e;
+const byte ccOsc1Tune = 0x4a;
+const byte ccOsc2Tune = 0x47;
+const byte ccMixer = 0x4c;
 
 float Note2Freq[] = {
   8.18, 8.66, 9.18, 9.72, 10.30, 10.91, 11.56, 12.25, 12.98, 13.75, 14.57, 15.43,
@@ -40,6 +61,11 @@ float Note2Freq[] = {
   8372.02, 8869.84, 9397.27, 9956.06, 10548.08, 11175.30, 11839.82, 12543.85, 13289.75  
 };
 
+Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> osc1Sin(SIN2048_DATA);
+Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> osc2Sin(SIN2048_DATA);
+
+Oscil <TRIANGLE2048_NUM_CELLS, AUDIO_RATE> osc1Tri(TRIANGLE2048_DATA);
+Oscil <TRIANGLE2048_NUM_CELLS, AUDIO_RATE> osc2Tri(TRIANGLE2048_DATA);
 
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc1Saw(SAW2048_DATA);
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc2Saw(SAW2048_DATA);
@@ -48,6 +74,7 @@ Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc1Squ(SQUARE_NO_ALIAS_2048_
 Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc2Squ(SQUARE_NO_ALIAS_2048_DATA);
 
 void setup() {
+  
   Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
   usbMIDI.setHandleNoteOn(onNoteOn);
@@ -62,7 +89,7 @@ void setup() {
 
 void onNoteOn(byte channel, byte note, byte velocity) {
     digitalWrite(ledPin, HIGH);                             // turn the LED on
-    currentNote = note;
+    currentNote = note -24;
     setOscPitch();
     ampLevel = 255;
     keyDownCount++;
@@ -79,8 +106,12 @@ void onNoteOff(byte channel, byte note, byte velocity) {
 void onControlChange(byte channel, byte control, byte value) {
   switch (control){
      case ccVol: masterVol = value; break;
-    
-  }
+     case ccMixer: mixerVal = value; break;
+     case ccOsc1Wav : if (value == 0x7f) {++ osc1WavIndex; if (osc1WavIndex > 1) osc1WavIndex = 0;} break;
+     case ccOsc2Wav : if (value == 0x7f) {++ osc2WavIndex; if (osc2WavIndex > 1) osc2WavIndex = 0;}; osc2FineTune = 1.0; break;
+     case ccOsc1Tune: osc1CoarseTune = map(value,0,127,-12,12); setOscPitch() ;  break;
+     case ccOsc2Tune: osc2FineTune = (map(value,0,127,98,102)/100.0); setOscPitch();  break;
+  }                     
 }
 
 void onPitchChange(byte channel, int pitch) {
@@ -91,9 +122,17 @@ void onPitchChange(byte channel, int pitch) {
 }
 
 void setOscPitch() {
-   float oscFreq = Note2Freq[currentNote];
-   oscFreq = oscFreq * pbFactor;
-   osc1Saw.setFreq(oscFreq);                        
+   float osc1Freq = Note2Freq[currentNote + osc1CoarseTune];
+   float osc2Freq = Note2Freq[currentNote] * osc2FineTune;
+
+   osc1Freq = osc1Freq * pbFactor;
+   osc2Freq = osc2Freq * pbFactor;
+
+   osc1Saw.setFreq(osc1Freq); 
+   osc1Squ.setFreq(osc1Freq); 
+  
+   osc2Saw.setFreq(osc2Freq); 
+   osc2Squ.setFreq(osc2Freq);                  
 }
 
 void updateControl(){
@@ -102,12 +141,21 @@ void updateControl(){
 }
 
 int updateAudio(){
-  int osc1SawSample = osc1Saw.next();
-  int osc1SquSample = osc1Squ.next();
-  int osc2SawSample = osc2Saw.next();
-  int osc2SquSample = osc1Squ.next();
+
+  osc1[0]= osc1Saw.next();
+  osc1[1]= osc1Squ.next();
+  osc2[0]= osc2Saw.next();
+  osc2[1]= osc2Squ.next();
   
-  int signal = osc1SawSample;
+  int osc1Sample = osc1[osc1WavIndex];                         
+  int osc2Sample = osc2[osc2WavIndex];
+  
+  osc1Sample = (osc1Sample * (127 - mixerVal)) >>7;
+  osc2Sample = (osc2Sample * mixerVal) >>7;
+
+  int signal = (osc1Sample + osc2Sample) >> 1;
+//  int ringmod = (osc1Sample * osc2Sample) >> 1;
+  
   signal = (signal * ampLevel) >> 8;
   signal = (signal * masterVol) >> 7;
   return signal; 
