@@ -8,6 +8,7 @@
 #include <ADC.h>
 #include <MozziGuts.h>
 #include <Oscil.h> 
+#include <LowPassFilter.h>
 
 #include <Audio.h>
 #include <Wire.h>
@@ -34,6 +35,8 @@ float osc2FineTune = 1.0;
 float pbFactor = 1.0;
 int osc1WavIndex = 0;
 int osc2WavIndex = 0;
+int octShift = -1;
+int filterCutOff = 200;
 
 int osc1[2];
 int osc2[2];
@@ -46,6 +49,9 @@ const byte ccOsc2Wav = 0x7e;
 const byte ccOsc1Tune = 0x4a;
 const byte ccOsc2Tune = 0x47;
 const byte ccMixer = 0x4c;
+const byte ccCutOff = 0x12;
+const byte ccResonance = 0x13;
+
 
 float Note2Freq[] = {
   8.18, 8.66, 9.18, 9.72, 10.30, 10.91, 11.56, 12.25, 12.98, 13.75, 14.57, 15.43,
@@ -61,17 +67,14 @@ float Note2Freq[] = {
   8372.02, 8869.84, 9397.27, 9956.06, 10548.08, 11175.30, 11839.82, 12543.85, 13289.75  
 };
 
-Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> osc1Sin(SIN2048_DATA);
-Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> osc2Sin(SIN2048_DATA);
-
-Oscil <TRIANGLE2048_NUM_CELLS, AUDIO_RATE> osc1Tri(TRIANGLE2048_DATA);
-Oscil <TRIANGLE2048_NUM_CELLS, AUDIO_RATE> osc2Tri(TRIANGLE2048_DATA);
-
+Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> lfoSin(SIN2048_DATA);
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc1Saw(SAW2048_DATA);
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc2Saw(SAW2048_DATA);
 
 Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc1Squ(SQUARE_NO_ALIAS_2048_DATA);
 Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc2Squ(SQUARE_NO_ALIAS_2048_DATA);
+
+LowPassFilter lpf;
 
 void setup() {
   
@@ -89,7 +92,7 @@ void setup() {
 
 void onNoteOn(byte channel, byte note, byte velocity) {
     digitalWrite(ledPin, HIGH);                             // turn the LED on
-    currentNote = note -24;
+    currentNote = note; // + (octShift *12);
     setOscPitch();
     ampLevel = 255;
     keyDownCount++;
@@ -105,12 +108,14 @@ void onNoteOff(byte channel, byte note, byte velocity) {
 
 void onControlChange(byte channel, byte control, byte value) {
   switch (control){
+     case ccCutOff: lpf.setCutoffFreq(value * 2); break;
+     case ccResonance: lpf.setResonance(value * 2); break;
      case ccVol: masterVol = value; break;
      case ccMixer: mixerVal = value; break;
      case ccOsc1Wav : if (value == 0x7f) {++ osc1WavIndex; if (osc1WavIndex > 1) osc1WavIndex = 0;} break;
      case ccOsc2Wav : if (value == 0x7f) {++ osc2WavIndex; if (osc2WavIndex > 1) osc2WavIndex = 0;}; osc2FineTune = 1.0; break;
      case ccOsc1Tune: osc1CoarseTune = map(value,0,127,-12,12); setOscPitch() ;  break;
-     case ccOsc2Tune: osc2FineTune = (map(value,0,127,98,102)/100.0); setOscPitch();  break;
+     case ccOsc2Tune: osc2FineTune = (map(value,0,127,98.0,102.0)/100.0); setOscPitch();  break;
   }                     
 }
 
@@ -122,8 +127,9 @@ void onPitchChange(byte channel, int pitch) {
 }
 
 void setOscPitch() {
-   float osc1Freq = Note2Freq[currentNote + osc1CoarseTune];
-   float osc2Freq = Note2Freq[currentNote] * osc2FineTune;
+   
+   float osc1Freq = Note2Freq[(currentNote + (12 * octShift)) + osc1CoarseTune];
+   float osc2Freq = Note2Freq[currentNote + (12 * octShift)] * osc2FineTune;
 
    osc1Freq = osc1Freq * pbFactor;
    osc2Freq = osc2Freq * pbFactor;
@@ -154,10 +160,10 @@ int updateAudio(){
   osc2Sample = (osc2Sample * mixerVal) >>7;
 
   int signal = (osc1Sample + osc2Sample) >> 1;
-//  int ringmod = (osc1Sample * osc2Sample) >> 1;
-  
+
   signal = (signal * ampLevel) >> 8;
   signal = (signal * masterVol) >> 7;
+  signal = lpf.next(signal);
   return signal; 
 }
 
