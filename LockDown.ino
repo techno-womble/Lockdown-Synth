@@ -2,13 +2,14 @@
  *  
  * Spring 2020 C19 Lockdown fun
  * John Potter (TechnoWomble)
- * Last mod 10 Apr 2020
+ * Last mod 26 Apr 2020
  * 
  */
 #include <ADC.h>
 #include <MozziGuts.h>
 #include <Oscil.h> 
 #include <LowPassFilter.h>
+#include <RollingAverage.h>
 
 #include <Audio.h>
 #include <Wire.h>
@@ -17,7 +18,7 @@
 
 // AudioOutputUSB      audioOutput;              try for USB audio later
 
-#include <tables/sin2048_int8.h> 
+#include <tables/cos2048_int8.h> 
 #include <tables/triangle2048_int8.h> 
 #include <tables/saw2048_int8.h> 
 #include <tables/square_no_alias_2048_int8.h> 
@@ -37,6 +38,8 @@ int osc1WavIndex = 0;
 int osc2WavIndex = 0;
 int octShift = -1;
 int filterCutOff = 200;
+byte lfoDepth = 0;
+
 
 int osc1[2];
 int osc2[2];
@@ -44,13 +47,16 @@ int osc2[2];
 // continuous controllers
 
 const byte ccVol = 0x07;
+const byte ccMod = 0x01;
 const byte ccOsc1Wav = 0x41;
 const byte ccOsc2Wav = 0x7e;
 const byte ccOsc1Tune = 0x4a;
 const byte ccOsc2Tune = 0x47;
 const byte ccMixer = 0x4c;
+const byte ccLFO = 0x4d;
 const byte ccCutOff = 0x12;
 const byte ccResonance = 0x13;
+
 
 
 float Note2Freq[] = {
@@ -67,12 +73,16 @@ float Note2Freq[] = {
   8372.02, 8869.84, 9397.27, 9956.06, 10548.08, 11175.30, 11839.82, 12543.85, 13289.75  
 };
 
-Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> lfoSin(SIN2048_DATA);
+RollingAverage <int, 4> pAverage;   
+
+Oscil <COS2048_NUM_CELLS, AUDIO_RATE> lfo1(COS2048_DATA);
+
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc1Saw(SAW2048_DATA);
 Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> osc2Saw(SAW2048_DATA);
 
 Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc1Squ(SQUARE_NO_ALIAS_2048_DATA);
 Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> osc2Squ(SQUARE_NO_ALIAS_2048_DATA);
+
 
 LowPassFilter lpf;
 
@@ -88,6 +98,8 @@ void setup() {
   digitalWrite(ledPin, HIGH);    
   delay(400);                                              // Blink LED once at startup to show life
   digitalWrite(ledPin, LOW);
+
+  lfo1.setFreq(0.5);
 }
 
 void onNoteOn(byte channel, byte note, byte velocity) {
@@ -108,10 +120,12 @@ void onNoteOff(byte channel, byte note, byte velocity) {
 
 void onControlChange(byte channel, byte control, byte value) {
   switch (control){
-     case ccCutOff: lpf.setCutoffFreq(value * 2); break;
+     case ccCutOff: if (value < 9) value = 9; lpf.setCutoffFreq(value * 2); break;
      case ccResonance: lpf.setResonance(value * 2); break;
      case ccVol: masterVol = value; break;
      case ccMixer: mixerVal = value; break;
+     case ccLFO : setLFOPitch(value); break;
+     case ccMod : lfoDepth = value * 2; break;
      case ccOsc1Wav : if (value == 0x7f) {++ osc1WavIndex; if (osc1WavIndex > 1) osc1WavIndex = 0;} break;
      case ccOsc2Wav : if (value == 0x7f) {++ osc2WavIndex; if (osc2WavIndex > 1) osc2WavIndex = 0;}; osc2FineTune = 1.0; break;
      case ccOsc1Tune: osc1CoarseTune = map(value,0,127,-12,12); setOscPitch() ;  break;
@@ -125,6 +139,7 @@ void onPitchChange(byte channel, int pitch) {
   if (pitch < 0) pbFactor = 1.0 - abs(pitch / 16384.0);
   setOscPitch(); 
 }
+
 
 void setOscPitch() {
    
@@ -141,6 +156,11 @@ void setOscPitch() {
    osc2Squ.setFreq(osc2Freq);                  
 }
 
+void setLFOPitch(int lfoFreq) {
+    float lfoRate = map(lfoFreq,0,127,1.0,10.0);
+    lfo1.setFreq(lfoRate);
+}
+
 void updateControl(){
   // put changing controls in here
    usbMIDI.read();
@@ -148,10 +168,17 @@ void updateControl(){
 
 int updateAudio(){
 
-  osc1[0]= osc1Saw.next();
-  osc1[1]= osc1Squ.next();
-  osc2[0]= osc2Saw.next();
-  osc2[1]= osc2Squ.next();
+  Q15n16 vibrato = (Q15n16) lfoDepth * lfo1.next();
+
+ // osc1[0]= osc1Saw.next();
+ // osc1[1]= osc1Squ.next();
+//  osc2[0]= osc2Saw.next();
+//  osc2[1]= osc2Squ.next();
+
+   osc1[0]= osc1Saw.phMod(vibrato);
+   osc1[1]= osc1Squ.phMod(vibrato);
+   osc2[0]= osc2Saw.phMod(vibrato);
+   osc2[1]= osc2Squ.phMod(vibrato);
   
   int osc1Sample = osc1[osc1WavIndex];                         
   int osc2Sample = osc2[osc2WavIndex];
@@ -162,7 +189,7 @@ int updateAudio(){
   int signal = (osc1Sample + osc2Sample) >> 1;
 
   signal = (signal * ampLevel) >> 8;
-  signal = (signal * masterVol) >> 7;
+  signal = (signal * masterVol) >> 3;
   signal = lpf.next(signal);
   return signal; 
 }
